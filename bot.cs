@@ -1,14 +1,10 @@
-﻿using Newtonsoft.Json;
-using System.Collections;
-using System.Collections.Generic;
-using System.Text.RegularExpressions;
+﻿using QueueKingBot;
 using Telegram.Bot;
 using Telegram.Bot.Exceptions;
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.ReplyMarkups;
-using static Microsoft.EntityFrameworkCore.DbLoggerCategory;
 
 #region Workflow
 // replace YOUR_BOT_TOKEN below
@@ -26,18 +22,13 @@ var me = await bot.GetMe();
 await bot.DeleteWebhook();          // you may comment this line if you find it unnecessary
 await bot.DropPendingUpdates();     // you may comment this line if you find it unnecessary
 
-Dictionary<string, Dictionary<string, string>> locales = new();
-string jsonLocales = File.ReadAllText("locales.json");
-locales = JsonConvert.DeserializeObject<Dictionary<string, Dictionary<string, string>>>(jsonLocales) ?? new();
+ApplicationContext db = new ApplicationContext();
 
 HashSet<int> waitQueueDeletion = new();
-using (ApplicationContext db = new ApplicationContext())
+DateTime nowTime = DateTime.Now;
+foreach (QueueDataEntry item in db.QueueDatas)
 {
-    DateTime nowTime = DateTime.Now;
-    foreach (QueueDataEntry item in db.QueueDatas)
-    {
-        _ = DelayedDeleteQueue(item.ExpireDate.Subtract(nowTime), item.QueueId);
-    }
+    _ = DelayedDeleteQueue(item.ExpireDate.Subtract(nowTime), item.QueueId);
 }
 
 bot.OnError += OnError;
@@ -54,29 +45,27 @@ Console.ReadLine();
 #region Functions
 int GetNextQueueId()
 {
-    ApplicationContext db = new ApplicationContext();
     if (!db.QueueDatas.Any()) { return 0; }
-    return db.QueueDatas.OrderByDescending(item => item.QueueId).First().QueueId + 1;
+    return db.QueueDatas.Max(item => item.QueueId) + 1;
 }
 
 string GetBeautifulQueueStringOutput(int queueId)
 {
-    string output = $"{FindTextWithQueue(queueId, "QueueOuput_Queue")}: <b>{GetQueueName(queueId)}</b>\n";
+    string output = $"{LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_Queue)}: <b>{GetQueueName(queueId)}</b>\n";
     QueueDataEntry entry = FindQueue(queueId);
-    if (entry.ExpireDate.Subtract(DateTime.Now).ToString().StartsWith('-'))
+    if (entry.ExpireDate < DateTime.Now)
     {
-        output += $"{FindTextWithQueue(queueId, "QueueOuput_Expired")}\n\n";
+        output += $"{LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_Expired)}\n\n";
     }
     else
     {
         DateTime expireTime = entry.ExpireDate;
-        output += $"{FindTextWithQueue(queueId, "QueueOuput_Expires")}: {string.Format("{0:d2}", expireTime.Day)}.{string.Format("{0:d2}", expireTime.Month)}.{string.Format("{0:d4}", expireTime.Year)} {string.Format("{0:d2}", expireTime.Hour)}:{string.Format("{0:d2}", expireTime.Minute)}\n\n";
+        output += $"{LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_Expires)}: {string.Format("{0:d2}", expireTime.Day)}.{string.Format("{0:d2}", expireTime.Month)}.{string.Format("{0:d4}", expireTime.Year)} {string.Format("{0:d2}", expireTime.Hour)}:{string.Format("{0:d2}", expireTime.Minute)}\n\n";
     }
-    ApplicationContext db = new ApplicationContext();
     List<QueueUserEntry> entries = db.Queues.Where(item => item.QueueId == queueId).ToList();
     if(entries.Count == 0)
     {
-        output += $"<i>{FindTextWithQueue(queueId, "QueueOuput_QueueIsEmpty")}</i>";
+        output += $"<i>{LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_QueueIsEmpty)}</i>";
         return output;
     }
     for(int i = 0; i < entries.Count; i++)
@@ -92,18 +81,18 @@ async Task UpdateQueueMessage(ChatId chatId, int messageId, int queueId)
                 messageId,
                 GetBeautifulQueueStringOutput(queueId),
                 parseMode: ParseMode.Html,
-                replyMarkup: FindQueue(queueId).ExpireDate.Subtract(DateTime.Now).ToString().StartsWith('-') ? null : 
+                replyMarkup: FindQueue(queueId).ExpireDate > DateTime.Now ? null : 
                 new InlineKeyboardButton[][]
                 {
-                    [(FindTextWithQueue(queueId, "QueueOuput_EnterQueue"), $"QueueEnter:{queueId.ToString()}")],
-                    [(FindTextWithQueue(queueId, "QueueOuput_LeaveQueue"), $"QueueLeave:{queueId.ToString()}")],
-                    [(FindTextWithQueue(queueId, "QueueOuput_LetAhead"), $"QueueLet:{queueId.ToString()}")]
+                    [(LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_EnterQueue), $"QueueEnter:{queueId.ToString()}")],
+                    [(LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_LeaveQueue), $"QueueLeave:{queueId.ToString()}")],
+                    [(LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_LetAhead), $"QueueLet:{queueId.ToString()}")]
                 });
 }
 
 async Task<Message> SendQueueMessage(ChatId chatId, int queueId)
 {
-    Message queueMsg = await bot.SendMessage(chatId, $"{FindTextWithQueue(queueId, "QueueOuput_Queue")}: <b>{GetQueueName(queueId)}</b>\n\n");
+    Message queueMsg = await bot.SendMessage(chatId, $"{LocalesTextHolder.GetText(chatId, LocaleKeys.QueueOutput_Queue)}: <b>{GetQueueName(queueId)}</b>\n\n");
     await UpdateQueueMessage(chatId, queueMsg.Id, queueId);
     return queueMsg;
 }
@@ -113,51 +102,8 @@ string GetQueueName(int queueId)
     return FindQueue(queueId).Name;
 }
 
-void SwapProperties<T>(T source, T destination)
-{
-    var properties = typeof(T).GetProperties();
-    foreach (var property in properties)
-    {
-        if (property.CanRead && property.CanWrite && property.ToString() != "Int32 Id")
-        {
-            var tempValue = property.GetValue(destination, null);
-            property.SetValue(destination, property.GetValue(source, null), null);
-            property.SetValue(source, tempValue, null);
-        }
-    }
-}
-
-string GetChatLocale(long chatId)
-{
-    ApplicationContext db = new ApplicationContext();
-    QueueChatLocaleEntry? queueChatEntry = db.QueueChatLocales.FirstOrDefault(item => item.ChatId == chatId);
-    if(queueChatEntry == null)
-    {
-        queueChatEntry = new QueueChatLocaleEntry();
-        queueChatEntry.ChatId = chatId;
-        queueChatEntry.LocaleName = "en";
-        db.Add(queueChatEntry);
-        db.SaveChanges();
-        return "en";
-    }
-    else
-    {
-        return queueChatEntry.LocaleName;
-    }
-}
-
-string FindTextWithChat(long chatId, string textStringKey)
-{
-    return locales[GetChatLocale(chatId)][textStringKey];
-}
-string FindTextWithQueue(int queueId, string textStringKey)
-{
-    return locales[GetChatLocale(FindQueue(queueId).QueueChatId)][textStringKey];
-}
-
 QueueDataEntry FindQueue(int queueId)
 {
-    ApplicationContext db = new ApplicationContext();
     QueueDataEntry? entry = db.QueueDatas.FirstOrDefault(item => item.QueueId == queueId);
     if(entry == null)
     {
@@ -171,9 +117,8 @@ async Task DelayedDeleteQueue(TimeSpan delay, int queueId)
 {
     waitQueueDeletion.Add(queueId);
     Console.WriteLine($"Waiting {delay} to delete queue {queueId}");
-    if(!delay.ToString().StartsWith('-')) await Task.Delay(delay);
+    if(delay > TimeSpan.Zero) await Task.Delay(delay);
     Console.WriteLine($"Deleting queue {queueId}");
-    ApplicationContext db = new ApplicationContext();
     QueueDataEntry entry = FindQueue(queueId);
     QueueUserEntry[] users = db.Queues.Where(item => item.QueueId == queueId).ToArray();
     try
@@ -183,7 +128,7 @@ async Task DelayedDeleteQueue(TimeSpan delay, int queueId)
     catch (ApiRequestException) { }
     db.QueueDatas.Remove(entry);
     db.RemoveRange(users);
-    db.SaveChanges();
+    await db.SaveChangesAsync();
     waitQueueDeletion.Remove(queueId);
 }
 #endregion
@@ -194,10 +139,9 @@ async Task HandleQueueButton(CallbackQuery callbackQuery)
     Console.WriteLine($"Received callback querry: {callbackQuery.Data}");
     if(callbackQuery.Data == null || callbackQuery.Message == null) { return; }
     int queueId = int.Parse(callbackQuery.Data[(callbackQuery.Data.IndexOf(':') + 1)..]);
-    ApplicationContext db = new ApplicationContext();
     if (db.QueueDatas.FirstOrDefault(item => item.QueueId == queueId) == null)
     {
-        await bot.AnswerCallbackQuery(callbackQuery.Id, $"{FindTextWithChat(callbackQuery.Message.Chat.Id, "Callback_QueueIsDeleted")}");
+        await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_QueueIsDeleted)}");
         return;
     }
     if (callbackQuery.Data.StartsWith("QueueEnter:"))
@@ -205,82 +149,63 @@ async Task HandleQueueButton(CallbackQuery callbackQuery)
         QueueUserEntry? checkUser = db.Queues.FirstOrDefault(item => item.UserId == callbackQuery.From.Id && item.QueueId == queueId);
         if (checkUser != null)
         {
-            await bot.AnswerCallbackQuery(callbackQuery.Id, $"{FindTextWithChat(callbackQuery.Message.Chat.Id, "Callback_YouAreInQueue")} {GetQueueName(queueId)}");
+            await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_YouAreInQueue)} {GetQueueName(queueId)}");
+            return;
         }
-        else
+        QueueUserEntry entry = new QueueUserEntry()
         {
-            QueueUserEntry entry = new QueueUserEntry()
-            {
-                UserId = callbackQuery.From.Id,
-                UserName = callbackQuery.From.FirstName + " " + callbackQuery.From.LastName,
-                QueueId = queueId
-            };
-            db.Add(entry);
-            db.SaveChanges();
-            await UpdateQueueMessage(callbackQuery.Message.Chat.Id, callbackQuery.Message.Id, queueId);
-            await bot.AnswerCallbackQuery(callbackQuery.Id, $"{FindTextWithChat(callbackQuery.Message.Chat.Id, "Callback_QueueEntered")} {GetQueueName(queueId)}");
-            Console.WriteLine($"user {callbackQuery.From.Id} added to queue {queueId}");
-        }
+            UserId = callbackQuery.From.Id,
+            UserName = callbackQuery.From.FirstName + " " + callbackQuery.From.LastName,
+            QueueId = queueId,
+            QueuePosition = db.Queues.Where(item => item.QueueId == queueId).Max(item => item.QueuePosition) + 1,
+        };
+        db.Add(entry);
+        await db.SaveChangesAsync();
+        await UpdateQueueMessage(callbackQuery.Message.Chat.Id, callbackQuery.Message.Id, queueId);
+        await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_QueueEntered)} {GetQueueName(queueId)}");
+        Console.WriteLine($"user {callbackQuery.From.Id} added to queue {queueId}");
     }
     else if (callbackQuery.Data.StartsWith("QueueLeave:"))
     {
         QueueUserEntry? entry = db.Queues.FirstOrDefault(item => item.UserId == callbackQuery.From.Id && item.QueueId == queueId);
         if (entry == null)
         {
-            await bot.AnswerCallbackQuery(callbackQuery.Id, $"{FindTextWithChat(callbackQuery.Message.Chat.Id, "Callback_NotInQueue")} {GetQueueName(queueId)}");
+            await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_NotInQueue)} {GetQueueName(queueId)}");
         }
         else
         {
             db.Remove(entry);
-            db.SaveChanges();
+            await db.SaveChangesAsync();
             await UpdateQueueMessage(callbackQuery.Message.Chat.Id, callbackQuery.Message.Id, queueId);
-            await bot.AnswerCallbackQuery(callbackQuery.Id, $"{FindTextWithChat(callbackQuery.Message.Chat.Id, "Callback_QueueLeft")} {GetQueueName(queueId)}");
+            await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_QueueLeft)} {GetQueueName(queueId)}");
             Console.WriteLine($"user {callbackQuery.From.Id} removed from queue {queueId}");
         }
     }
     else if (callbackQuery.Data.StartsWith("QueueLet:"))
     {
-        QueueUserEntry? initialUser = null, nextUser = null;
-        foreach (QueueUserEntry item in db.Queues)
-        {
-            if (initialUser == null)
-            {
-                if (item.UserId == callbackQuery.From.Id && item.QueueId == queueId)
-                {
-                    initialUser = item;
-                }
-            }
-            else
-            {
-                if (item.QueueId == queueId)
-                {
-                    nextUser = item;
-                    break;
-                }
-            }
-        }
+        QueueUserEntry? initialUser, nextUser;
+        initialUser = db.Queues.FirstOrDefault(item => item.UserId == callbackQuery.From.Id && item.QueueId == queueId);
         if (initialUser == null)
         {
-            await bot.AnswerCallbackQuery(callbackQuery.Id, $"{FindTextWithChat(callbackQuery.Message.Chat.Id, "Callback_NotInQueue")} {GetQueueName(queueId)}");
+            await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_NotInQueue)} {GetQueueName(queueId)}");
             return;
         }
+        nextUser = db.Queues.FirstOrDefault(item => item.QueuePosition == initialUser.QueuePosition + 1 && item.QueueId == queueId);
         if (nextUser == null)
         {
-            await bot.AnswerCallbackQuery(callbackQuery.Id, $"{FindTextWithChat(callbackQuery.Message.Chat.Id, "Callback_NobodyToLet")} {GetQueueName(queueId)}");
+            await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_NobodyToLet)} {GetQueueName(queueId)}");
             return;
         }
         Console.WriteLine("trying to swap users");
-        SwapProperties<QueueUserEntry>(initialUser, nextUser);
-        db.Update(initialUser);
-        db.Update(nextUser);
-        db.SaveChanges();
+        (initialUser.QueuePosition, nextUser.QueuePosition) = (nextUser.QueuePosition, initialUser.QueuePosition);
+        db.UpdateRange([initialUser, nextUser]);
+        await db.SaveChangesAsync();
         await UpdateQueueMessage(callbackQuery.Message.Chat.Id, callbackQuery.Message.Id, queueId);
         Console.WriteLine($"swapped data of users {initialUser.UserId} and {nextUser.UserId}");
     }
 }
 async Task CreateQueueCommand(string args, Message msg)
 {
-    ApplicationContext db = new ApplicationContext();
     Console.WriteLine("Executing command \"/createqueue\"");
     string? queueName = null; char? timeType = null; string? queueTime = null;
     int typeIndex = args.LastIndexOf(" -time:");
@@ -302,7 +227,7 @@ async Task CreateQueueCommand(string args, Message msg)
     queueName = typeIndex == -1 ? args : args[..typeIndex];
     if (queueName == null)
     {
-        await bot.SendMessage(msg.Chat.Id, $"{FindTextWithChat(msg.Chat.Id, "Command_EmpltyQueueName")}");
+        await bot.SendMessage(msg.Chat.Id, $"{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Command_EmptyQueueName)}");
         return;
     }
     DateTime expireTime = DateTime.MinValue;
@@ -313,15 +238,15 @@ async Task CreateQueueCommand(string args, Message msg)
         {
             if(!DateTime.TryParse(queueTime, out expireTime))
             {
-                await bot.SendMessage(msg.Chat.Id, $"{FindTextWithChat(msg.Chat.Id, "Command_InvalidDateTime")}");
+                await bot.SendMessage(msg.Chat.Id, $"{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Command_InvalidDateTime)}");
                 return;
             }
-            if (expireTime.Subtract(now).ToString().StartsWith('-'))
+            if (expireTime < now)
             {
-                await bot.SendMessage(msg.Chat.Id, $"{FindTextWithChat(msg.Chat.Id, "Command_NegativeWaitTime")}");
+                await bot.SendMessage(msg.Chat.Id, $"{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Command_NegativeWaitTime)}");
                 return;
             }
-            if(expireTime.Hour == 0 && expireTime.Minute == 0 && expireTime.Second == 0)
+            if(expireTime is { Hour: 0, Minute: 0, Second: 0 })
             {
                 expireTime.AddHours(now.Hour);
                 expireTime.AddMinutes(now.Minute);
@@ -332,7 +257,7 @@ async Task CreateQueueCommand(string args, Message msg)
         {
             if (!TimeSpan.TryParse(queueTime, out expireSpan))
             {
-                await bot.SendMessage(msg.Chat.Id, $"{FindTextWithChat(msg.Chat.Id, "Command_InvalidTimeSpan")}");
+                await bot.SendMessage(msg.Chat.Id, $"{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Command_InvalidTimeSpan)}");
                 return;
             }
             else
@@ -342,19 +267,18 @@ async Task CreateQueueCommand(string args, Message msg)
         }
     }
     int queueId = GetNextQueueId();
+    Message queueMsg = await bot.SendMessage(msg.Chat.Id, "loading...");
     QueueDataEntry entry = new QueueDataEntry()
     {
         QueueId = queueId,
         Name = queueName,
         ExpireDate = expireTime == DateTime.MinValue ? now.AddDays(7) : expireTime,
-        QueueChatId = msg.Chat.Id
+        QueueChatId = msg.Chat.Id,
+        QueueMessageId = queueMsg.Id
     };
     db.Add(entry);
-    db.SaveChanges();
-    Message queueMsg = await SendQueueMessage(msg.Chat.Id, queueId);
-    entry.QueueMessageId = queueMsg.Id;
-    db.Update(entry);
-    db.SaveChanges();
+    await db.SaveChangesAsync();
+    await UpdateQueueMessage(msg.Chat.Id, queueMsg.Id, queueId);
     Console.WriteLine($"created queue \"{queueName}\":{queueId}, expires: {entry.ExpireDate}");
     _ = DelayedDeleteQueue(entry.ExpireDate.Subtract(now), queueId);
 }
@@ -362,8 +286,7 @@ async Task CreateQueueCommand(string args, Message msg)
 async Task ShowAllQueuesCommand(Message msg)
 {
     Console.WriteLine("Executing /showallqueues command");
-    ApplicationContext db = new ApplicationContext();
-    if (!db.QueueDatas.Any(item => item.QueueChatId == msg.Chat.Id)) { await bot.SendMessage(msg.Chat.Id, FindTextWithChat(msg.Chat.Id, "Command_NoQueuesInChat")); return; }
+    if (!db.QueueDatas.Any(item => item.QueueChatId == msg.Chat.Id)) { await bot.SendMessage(msg.Chat.Id, LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Command_NoQueuesInChat)); return; }
     foreach (var queue in db.QueueDatas)
     {
         if (queue.QueueChatId != msg.Chat.Id) continue;
@@ -372,7 +295,7 @@ async Task ShowAllQueuesCommand(Message msg)
             ReplyParameters parameters = new ReplyParameters();
             parameters.ChatId = queue.QueueChatId;
             parameters.MessageId = queue.QueueMessageId;
-            await bot.SendMessage(msg.Chat.Id, $"{FindTextWithChat(queue.QueueChatId, "Command_HereIsQueue")} {GetQueueName(queue.QueueId)}", replyParameters: parameters);
+            await bot.SendMessage(msg.Chat.Id, $"{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Command_HereIsQueue)} {GetQueueName(queue.QueueId)}", replyParameters: parameters);
         }
         catch (ApiRequestException e)
         {
@@ -383,7 +306,7 @@ async Task ShowAllQueuesCommand(Message msg)
                 QueueDataEntry entryToUpdate = FindQueue(queue.QueueId);
                 entryToUpdate.QueueMessageId = newQueueMessage.Id;
                 db.Update(entryToUpdate);
-                db.SaveChanges();
+                await db.SaveChangesAsync();
             }
         }
     }
@@ -397,16 +320,15 @@ async Task ShowMyQueuesCommand(Message msg)
         return;
     }
     Console.WriteLine("Executing /showmyqueues command");
-    ApplicationContext db = new ApplicationContext();
-    if (msg.Chat.Type != ChatType.Private) { await bot.SendMessage(msg.Chat.Id, FindTextWithChat(msg.Chat.Id, "Command_OnlyInPerson")); return; }
+    if (msg.Chat.Type != ChatType.Private) { await bot.SendMessage(msg.Chat.Id, LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Command_OnlyInPerson)); return; }
     List<int> queues = db.Queues.Where(item => item.UserId == msg.From.Id).Select(item => item.QueueId).ToList();
-    if (!queues.Any()) { await bot.SendMessage(msg.Chat.Id, FindTextWithChat(msg.Chat.Id, "Command_YouAreNotInAnyQueue")); return; }
+    if (!queues.Any()) { await bot.SendMessage(msg.Chat.Id, LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Command_YouAreNotInAnyQueue)); return; }
     foreach (int id in queues)
     {
         QueueDataEntry? myQueue = db.QueueDatas.FirstOrDefault(item => item.QueueId == id);
         if (myQueue == null) { Console.WriteLine($"There is no queue with id {id} in database"); continue; }
         string link = $"$\"https://t.me/c/{myQueue.QueueChatId.ToString().Substring(4)}/{myQueue.QueueMessageId}\"";
-        string preparedQueueLink = $"{FindTextWithChat(msg.Chat.Id, "QueueOuput_Queue")} {myQueue.Name} {link}";
+        string preparedQueueLink = $"{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.QueueOutput_Queue)} {myQueue.Name} {link}";
         await bot.SendMessage(msg.Chat.Id, preparedQueueLink);
         await bot.ForwardMessage(msg.Chat.Id, myQueue.QueueChatId, myQueue.QueueMessageId);
     }
@@ -415,29 +337,27 @@ async Task ShowMyQueuesCommand(Message msg)
 async Task SetLocaleCommand(string args, Message msg)
 {
     Console.WriteLine("Executing /setlocale command");
-    if (!locales.ContainsKey(args))
+    if (!LocalesTextHolder.HasLocale(args))
     {
-        await bot.SendMessage(msg.Chat.Id, $"{FindTextWithChat(msg.Chat.Id, "Command_LocaleNotFound")} {args}");
+        await bot.SendMessage(msg.Chat.Id, $"{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Command_LocaleNotFound)} {args}");
         return;
     }
-    GetChatLocale(msg.Chat.Id);
-    ApplicationContext db = new ApplicationContext();
     QueueChatLocaleEntry localeEntry = db.QueueChatLocales.First(item => item.ChatId == msg.Chat.Id);
     localeEntry.LocaleName = args;
     db.Update(localeEntry);
-    db.SaveChanges();
-    await bot.SendMessage(msg.Chat.Id, $"{FindTextWithChat(msg.Chat.Id, "Command_LocaleSet")} {args}");
+    await db.SaveChangesAsync();
+    await bot.SendMessage(msg.Chat.Id, $"{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Command_LocaleSet)} {args}");
 }
 
 async Task UsageCommand(Message msg)
 {
     Console.WriteLine("Executing /usage command");
-    string usageMessage = $"{FindTextWithChat(msg.Chat.Id, "Usage_Title")}" +
-                $"\n\n/createqueue <{FindTextWithChat(msg.Chat.Id, "Usage_Name")}> - {FindTextWithChat(msg.Chat.Id, "Usage_CreateQueueUsage")}" +
-                $"\n\n/showallqueues - {FindTextWithChat(msg.Chat.Id, "Usage_ShowAllQueues")}" +
-                $"\n\n/showmyqueues - {FindTextWithChat(msg.Chat.Id, "Usage_ShowMyQueues")}" +
-                $"\n\n/usage - {FindTextWithChat(msg.Chat.Id, "Usage_Usage")}" +
-                $"\n\n/setlocale <{FindTextWithChat(msg.Chat.Id, "Usage_Name")}> - {FindTextWithChat(msg.Chat.Id, "Usage_SetLocale")}";
+    string usageMessage = $"{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Title)}" +
+                $"\n\n/createqueue <{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Name)}> - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_CreateQueueUsage)}" +
+                $"\n\n/showallqueues - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_ShowAllQueues)}" +
+                $"\n\n/showmyqueues - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_ShowMyQueues)}" +
+                $"\n\n/usage - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Usage)}" +
+                $"\n\n/setlocale <{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Name)}> - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_SetLocale)}";
     await bot.SendMessage(msg.Chat.Id, usageMessage);
 }
 #endregion
