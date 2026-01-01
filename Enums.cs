@@ -34,10 +34,12 @@ public enum LocaleKeys
     Usage_Usage
 }
 
-public enum DateTimeIndicateType
+public enum CommandArgumentType
 {
-    Date,
-    Time
+    QueueName,
+    ExpireDate,
+    ExpireTime,
+    LocaleName
 }
 
 public enum CallbackQueryType
@@ -46,4 +48,15 @@ public enum CallbackQueryType
     QueueEnter,
     QueueLeave,
     QueueLet
+}
+
+public enum BotCommandType
+{
+    None,
+    Invalid,
+    CreateQueue,
+    ShowAllQueues,
+    ShowMyQueues,
+    Usage,
+    SetLocale
 }

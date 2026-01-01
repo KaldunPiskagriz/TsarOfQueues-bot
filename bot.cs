@@ -6,6 +6,7 @@ using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.ReplyMarkups;
+using BotCommand = QueueKingBot.BotCommand;
 
 #region Workflow
 // replace YOUR_BOT_TOKEN below
@@ -60,8 +61,7 @@ string GetBeautifulQueueStringOutput(int queueId)
     }
     else
     {
-        DateTime expireTime = entry.ExpireDate;
-        sb.Append($"{LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_Expires)}: {string.Format("{0:d2}", expireTime.Day)}.{string.Format("{0:d2}", expireTime.Month)}.{string.Format("{0:d4}", expireTime.Year)} {string.Format("{0:d2}", expireTime.Hour)}:{string.Format("{0:d2}", expireTime.Minute)}\n\n");
+        sb.Append($"{LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_Expires)}: {entry.ExpireDate:G}\n\n");
     }
 
     ICollection<QueueUserEntry>? entries = entry.Users;
@@ -208,66 +208,42 @@ async Task HandleQueueButton(CallbackQuery callbackQuery)
             break;
     }
 }
-async Task CreateQueueCommand(string args, Message msg)
+async Task CreateQueueCommand(Dictionary<CommandArgumentType, string> args, Message msg)
 {
     Console.WriteLine("Executing command \"/createqueue\"");
-    string? queueName = null; char? timeType = null; string? queueTime = null;
-    int typeIndex = args.LastIndexOf(" -time:");
-    DateTime now = DateTime.Now;
-    if (typeIndex == -1)
-    {
-        typeIndex = args.LastIndexOf(" -date:");
-        if(typeIndex > -1)
-        {
-            timeType = 'd';
-            queueTime = args[(typeIndex + 7)..];
-        }
-    }
-    else
-    {
-        timeType = 't';
-        queueTime = args[(typeIndex + 7)..];
-    }
-    queueName = typeIndex == -1 ? args : args[..typeIndex];
-    if (queueName == null)
+    if (args[CommandArgumentType.QueueName] == "")
     {
         await bot.SendMessage(msg.Chat.Id, $"{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Command_EmptyQueueName)}");
         return;
     }
     DateTime expireTime = DateTime.MinValue;
-    TimeSpan expireSpan = TimeSpan.Zero;
-    if(queueTime != null)
+    if(args.Count > 1)
     {
-        if (timeType == 'd')
+        if (args.TryGetValue(CommandArgumentType.ExpireDate, out string? date))
         {
-            if(!DateTime.TryParse(queueTime, out expireTime))
+            if(!DateTime.TryParse(date, out expireTime))
             {
                 await bot.SendMessage(msg.Chat.Id, $"{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Command_InvalidDateTime)}");
                 return;
             }
-            if (expireTime < now)
+            if (expireTime < DateTime.Now)
             {
                 await bot.SendMessage(msg.Chat.Id, $"{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Command_NegativeWaitTime)}");
                 return;
             }
             if(expireTime is { Hour: 0, Minute: 0, Second: 0 })
             {
-                expireTime.AddHours(now.Hour);
-                expireTime.AddMinutes(now.Minute);
-                expireTime.AddSeconds(now.Second);
+                expireTime = expireTime.AddHours(DateTime.Now.Hour).AddMinutes(DateTime.Now.Minute).AddSeconds(DateTime.Now.Second);
             }
         }
-        if (timeType == 't')
+        if (args.TryGetValue(CommandArgumentType.ExpireTime, out string? time))
         {
-            if (!TimeSpan.TryParse(queueTime, out expireSpan))
+            if (!TimeSpan.TryParse(time, out TimeSpan expireSpan))
             {
                 await bot.SendMessage(msg.Chat.Id, $"{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Command_InvalidTimeSpan)}");
                 return;
             }
-            else
-            {
-                expireTime = now.Add(expireSpan);
-            }
+            expireTime = DateTime.Now.Add(expireSpan);
         }
     }
     int queueId = GetNextQueueId();
@@ -275,16 +251,16 @@ async Task CreateQueueCommand(string args, Message msg)
     QueueDataEntry entry = new QueueDataEntry()
     {
         QueueId = queueId,
-        Name = queueName,
-        ExpireDate = expireTime == DateTime.MinValue ? now.AddDays(7) : expireTime,
+        Name = args[CommandArgumentType.QueueName],
+        ExpireDate = expireTime == DateTime.MinValue ? DateTime.Now.AddDays(7) : expireTime,
         QueueChatId = msg.Chat.Id,
         QueueMessageId = queueMsg.Id
     };
     db.Add(entry);
     await db.SaveChangesAsync();
     await UpdateQueueMessage(msg.Chat.Id, queueMsg.Id, queueId);
-    Console.WriteLine($"created queue \"{queueName}\":{queueId}, expires: {entry.ExpireDate}");
-    _ = DelayedDeleteQueue(entry.ExpireDate.Subtract(now), queueId);
+    Console.WriteLine($"created queue \"{entry.Name}\":{queueId}, expires: {entry.ExpireDate}");
+    _ = DelayedDeleteQueue(entry.ExpireDate.Subtract(DateTime.Now), queueId);
 }
 
 async Task ShowAllQueuesCommand(Message msg)
@@ -360,11 +336,11 @@ async Task UsageCommand(Message msg)
     Console.WriteLine("Executing /usage command");
     StringBuilder sb = new StringBuilder();
     sb.Append($"{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Title)}");
-    sb.Append($"\n\n/createqueue <{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Name)}> - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_CreateQueueUsage)}");
-    sb.Append($"\n\n/showallqueues - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_ShowAllQueues)}");
-    sb.Append($"\n\n/showmyqueues - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_ShowMyQueues)}");
-    sb.Append($"\n\n/usage - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Usage)}");
-    sb.Append($"\n\n/setlocale <{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Name)}> - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_SetLocale)}");
+    sb.Append($"\n\n/CreateQueue <{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Name)}> - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_CreateQueueUsage)}");
+    sb.Append($"\n\n/ShowAllQueues - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_ShowAllQueues)}");
+    sb.Append($"\n\n/ShowMyQueues - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_ShowMyQueues)}");
+    sb.Append($"\n\n/Usage - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Usage)}");
+    sb.Append($"\n\n/SetLocale <{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Name)}> - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_SetLocale)}");
     await bot.SendMessage(msg.Chat.Id, sb.ToString());
 }
 #endregion
@@ -383,32 +359,28 @@ async Task OnMessage(Message msg, UpdateType type)
     else if (text.StartsWith('/'))
     {
         Console.WriteLine($"Received a message: {msg.Text}");
-        var space = text.IndexOf(' ');
-        if (space < 0) space = text.Length;
-        var command = text[..space].ToLower();
-        string args = text[space..].TrimStart();
-        Console.WriteLine($"Recognized command: \"{command}\"; Args:\"{args}\"");
-        await OnCommand(command, args, msg);
+        BotCommand command = new BotCommand(msg.Text);
+        await OnCommand(command, msg);
     }
 }
 
-async Task OnCommand(string command, string args, Message msg)
+async Task OnCommand(BotCommand command, Message msg)
 {
-    switch (command)
+    switch (command.type)
     {
-        case "/createqueue":
-            await CreateQueueCommand(args, msg);
+        case BotCommandType.CreateQueue:
+            await CreateQueueCommand(command.arguments, msg);
             break;
-        case "/showallqueues":
+        case BotCommandType.ShowAllQueues:
             await ShowAllQueuesCommand(msg);
             break;
-        case "/showmyqueues":
+        case BotCommandType.ShowMyQueues:
             await ShowMyQueuesCommand(msg);
             break;
-        case "/setlocale":
-            await SetLocaleCommand(args, msg);
+        case BotCommandType.SetLocale:
+            await SetLocaleCommand(command.arguments[CommandArgumentType.LocaleName], msg);
             break;
-        case "/usage":
+        case BotCommandType.Usage:
             await UsageCommand(msg);
             break;
         default:
