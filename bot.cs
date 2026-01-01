@@ -1,4 +1,5 @@
-﻿using QueueKingBot;
+﻿using System.Text;
+using QueueKingBot;
 using Telegram.Bot;
 using Telegram.Bot.Exceptions;
 using Telegram.Bot.Polling;
@@ -24,7 +25,6 @@ await bot.DropPendingUpdates();     // you may comment this line if you find it 
 
 ApplicationContext db = new ApplicationContext();
 
-HashSet<int> waitQueueDeletion = new();
 DateTime nowTime = DateTime.Now;
 foreach (QueueDataEntry item in db.QueueDatas)
 {
@@ -51,28 +51,30 @@ int GetNextQueueId()
 
 string GetBeautifulQueueStringOutput(int queueId)
 {
-    string output = $"{LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_Queue)}: <b>{GetQueueName(queueId)}</b>\n";
+    StringBuilder sb = new StringBuilder();
+    sb.Append($"{LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_Queue)}: <b>{GetQueueName(queueId)}</b>\n");
     QueueDataEntry entry = FindQueue(queueId);
     if (entry.ExpireDate < DateTime.Now)
     {
-        output += $"{LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_Expired)}\n\n";
+        sb.Append($"{LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_Expired)}\n\n");
     }
     else
     {
         DateTime expireTime = entry.ExpireDate;
-        output += $"{LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_Expires)}: {string.Format("{0:d2}", expireTime.Day)}.{string.Format("{0:d2}", expireTime.Month)}.{string.Format("{0:d4}", expireTime.Year)} {string.Format("{0:d2}", expireTime.Hour)}:{string.Format("{0:d2}", expireTime.Minute)}\n\n";
+        sb.Append($"{LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_Expires)}: {string.Format("{0:d2}", expireTime.Day)}.{string.Format("{0:d2}", expireTime.Month)}.{string.Format("{0:d4}", expireTime.Year)} {string.Format("{0:d2}", expireTime.Hour)}:{string.Format("{0:d2}", expireTime.Minute)}\n\n");
     }
-    List<QueueUserEntry> entries = db.Queues.Where(item => item.QueueId == queueId).ToList();
-    if(entries.Count == 0)
+
+    ICollection<QueueUserEntry>? entries = entry.Users;
+    if (entries == null || entries.Count == 0)
     {
-        output += $"<i>{LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_QueueIsEmpty)}</i>";
-        return output;
+        sb.Append($"<i>{LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_QueueIsEmpty)}</i>");
+        return sb.ToString();
     }
-    for(int i = 0; i < entries.Count; i++)
+    foreach (var e in entries.OrderBy(item => item.QueuePosition))
     {
-        output += $"{i + 1}. {entries[i].UserName}\n";
+        sb.Append($"{e.QueuePosition}. {e.UserName}\n");
     }
-    return output;
+    return sb.ToString();
 }
 
 async Task UpdateQueueMessage(ChatId chatId, int messageId, int queueId)
@@ -81,12 +83,12 @@ async Task UpdateQueueMessage(ChatId chatId, int messageId, int queueId)
                 messageId,
                 GetBeautifulQueueStringOutput(queueId),
                 parseMode: ParseMode.Html,
-                replyMarkup: FindQueue(queueId).ExpireDate > DateTime.Now ? null : 
+                replyMarkup: FindQueue(queueId).ExpireDate < DateTime.Now ? null : 
                 new InlineKeyboardButton[][]
                 {
-                    [(LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_EnterQueue), $"QueueEnter:{queueId.ToString()}")],
-                    [(LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_LeaveQueue), $"QueueLeave:{queueId.ToString()}")],
-                    [(LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_LetAhead), $"QueueLet:{queueId.ToString()}")]
+                    [(LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_EnterQueue), $"{CallbackQueryType.QueueEnter}:{queueId.ToString()}")],
+                    [(LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_LeaveQueue), $"{CallbackQueryType.QueueLeave}:{queueId.ToString()}")],
+                    [(LocalesTextHolder.GetText(queueId, LocaleKeys.QueueOutput_LetAhead), $"{CallbackQueryType.QueueLet}:{queueId.ToString()}")]
                 });
 }
 
@@ -105,103 +107,105 @@ string GetQueueName(int queueId)
 QueueDataEntry FindQueue(int queueId)
 {
     QueueDataEntry? entry = db.QueueDatas.FirstOrDefault(item => item.QueueId == queueId);
-    if(entry == null)
-    {
-        Console.WriteLine($"Cannot find queue: queue with id {queueId} doesn't exist");
-        return new QueueDataEntry();
-    }
-    return entry;
+    if (entry != null) return entry;
+    Console.WriteLine($"Cannot find queue: queue with id {queueId} doesn't exist");
+    return new QueueDataEntry();
 }
 
 async Task DelayedDeleteQueue(TimeSpan delay, int queueId)
 {
-    waitQueueDeletion.Add(queueId);
     Console.WriteLine($"Waiting {delay} to delete queue {queueId}");
     if(delay > TimeSpan.Zero) await Task.Delay(delay);
     Console.WriteLine($"Deleting queue {queueId}");
     QueueDataEntry entry = FindQueue(queueId);
-    QueueUserEntry[] users = db.Queues.Where(item => item.QueueId == queueId).ToArray();
     try
     {
         await UpdateQueueMessage(entry.QueueChatId, entry.QueueMessageId, entry.QueueId);
     }
     catch (ApiRequestException) { }
     db.QueueDatas.Remove(entry);
-    db.RemoveRange(users);
+    if(entry.Users != null) db.RemoveRange(entry.Users.ToArray<object>());
     await db.SaveChangesAsync();
-    waitQueueDeletion.Remove(queueId);
 }
 #endregion
 
 #region Bot commands
 async Task HandleQueueButton(CallbackQuery callbackQuery)
 {
-    Console.WriteLine($"Received callback querry: {callbackQuery.Data}");
+    Console.WriteLine($"Received callback query: {callbackQuery.Data}");
     if(callbackQuery.Data == null || callbackQuery.Message == null) { return; }
-    int queueId = int.Parse(callbackQuery.Data[(callbackQuery.Data.IndexOf(':') + 1)..]);
-    if (db.QueueDatas.FirstOrDefault(item => item.QueueId == queueId) == null)
+    string[] queryStrings = callbackQuery.Data.Split(':');
+    int queueId = int.Parse(queryStrings[1]);
+    if (!Enum.TryParse(queryStrings[0], out CallbackQueryType queryType)) { queryType = CallbackQueryType.None; }
+    QueueDataEntry thisQueue = FindQueue(queueId);
+    if (thisQueue == new QueueDataEntry())
     {
-        await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_QueueIsDeleted)}");
+        await bot.AnswerCallbackQuery(callbackQuery.Id,
+            $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_QueueIsDeleted)}");
         return;
     }
-    if (callbackQuery.Data.StartsWith("QueueEnter:"))
+    switch (queryType)
     {
-        QueueUserEntry? checkUser = db.Queues.FirstOrDefault(item => item.UserId == callbackQuery.From.Id && item.QueueId == queueId);
-        if (checkUser != null)
-        {
-            await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_YouAreInQueue)} {GetQueueName(queueId)}");
-            return;
-        }
-        QueueUserEntry entry = new QueueUserEntry()
-        {
-            UserId = callbackQuery.From.Id,
-            UserName = callbackQuery.From.FirstName + " " + callbackQuery.From.LastName,
-            QueueId = queueId,
-            QueuePosition = db.Queues.Where(item => item.QueueId == queueId).Max(item => item.QueuePosition) + 1,
-        };
-        db.Add(entry);
-        await db.SaveChangesAsync();
-        await UpdateQueueMessage(callbackQuery.Message.Chat.Id, callbackQuery.Message.Id, queueId);
-        await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_QueueEntered)} {GetQueueName(queueId)}");
-        Console.WriteLine($"user {callbackQuery.From.Id} added to queue {queueId}");
-    }
-    else if (callbackQuery.Data.StartsWith("QueueLeave:"))
-    {
-        QueueUserEntry? entry = db.Queues.FirstOrDefault(item => item.UserId == callbackQuery.From.Id && item.QueueId == queueId);
-        if (entry == null)
-        {
-            await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_NotInQueue)} {GetQueueName(queueId)}");
-        }
-        else
-        {
-            db.Remove(entry);
+        case CallbackQueryType.QueueEnter:
+            QueueUserEntry? checkUser = db.Queues.FirstOrDefault(item => item.UserId == callbackQuery.From.Id && item.QueueId == queueId);
+            if (checkUser != null)
+            {
+                await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_YouAreInQueue)} {GetQueueName(queueId)}");
+                return;
+            }
+            int position = 0;
+            if (thisQueue.Users is { Count: > 0 })
+            {
+                position = thisQueue.Users.Max(item => item.QueuePosition);
+            }
+            QueueUserEntry newUserEntry = new QueueUserEntry
+            {
+                UserId = callbackQuery.From.Id,
+                UserName = callbackQuery.From.FirstName + " " + callbackQuery.From.LastName,
+                QueueId = queueId,
+                QueuePosition = position + 1,
+            };
+            db.Add(newUserEntry);
             await db.SaveChangesAsync();
             await UpdateQueueMessage(callbackQuery.Message.Chat.Id, callbackQuery.Message.Id, queueId);
-            await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_QueueLeft)} {GetQueueName(queueId)}");
-            Console.WriteLine($"user {callbackQuery.From.Id} removed from queue {queueId}");
-        }
-    }
-    else if (callbackQuery.Data.StartsWith("QueueLet:"))
-    {
-        QueueUserEntry? initialUser, nextUser;
-        initialUser = db.Queues.FirstOrDefault(item => item.UserId == callbackQuery.From.Id && item.QueueId == queueId);
-        if (initialUser == null)
-        {
-            await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_NotInQueue)} {GetQueueName(queueId)}");
-            return;
-        }
-        nextUser = db.Queues.FirstOrDefault(item => item.QueuePosition == initialUser.QueuePosition + 1 && item.QueueId == queueId);
-        if (nextUser == null)
-        {
-            await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_NobodyToLet)} {GetQueueName(queueId)}");
-            return;
-        }
-        Console.WriteLine("trying to swap users");
-        (initialUser.QueuePosition, nextUser.QueuePosition) = (nextUser.QueuePosition, initialUser.QueuePosition);
-        db.UpdateRange([initialUser, nextUser]);
-        await db.SaveChangesAsync();
-        await UpdateQueueMessage(callbackQuery.Message.Chat.Id, callbackQuery.Message.Id, queueId);
-        Console.WriteLine($"swapped data of users {initialUser.UserId} and {nextUser.UserId}");
+            await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_QueueEntered)} {GetQueueName(queueId)}");
+            Console.WriteLine($"user {callbackQuery.From.Id} added to queue {queueId}");
+            break;
+        case CallbackQueryType.QueueLeave:
+            QueueUserEntry? userEntry = db.Queues.FirstOrDefault(item => item.UserId == callbackQuery.From.Id && item.QueueId == queueId);
+            if (userEntry == null)
+            {
+                await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_NotInQueue)} {GetQueueName(queueId)}");
+            }
+            else
+            {
+                db.Remove(userEntry);
+                await db.SaveChangesAsync();
+                await UpdateQueueMessage(callbackQuery.Message.Chat.Id, callbackQuery.Message.Id, queueId);
+                await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_QueueLeft)} {GetQueueName(queueId)}");
+                Console.WriteLine($"user {callbackQuery.From.Id} removed from queue {queueId}");
+            }
+            break;
+        case CallbackQueryType.QueueLet:
+            var initialUser = db.Queues.FirstOrDefault(item => item.UserId == callbackQuery.From.Id && item.QueueId == queueId);
+            if (initialUser == null)
+            {
+                await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_NotInQueue)} {GetQueueName(queueId)}");
+                return;
+            }
+            var nextUser = db.Queues.FirstOrDefault(item => item.QueuePosition == initialUser.QueuePosition + 1 && item.QueueId == queueId);
+            if (nextUser == null)
+            {
+                await bot.AnswerCallbackQuery(callbackQuery.Id, $"{LocalesTextHolder.GetText(callbackQuery.Message.Chat.Id, LocaleKeys.Callback_NobodyToLet)} {GetQueueName(queueId)}");
+                return;
+            }
+            Console.WriteLine("trying to swap users");
+            (initialUser.QueuePosition, nextUser.QueuePosition) = (nextUser.QueuePosition, initialUser.QueuePosition);
+            db.UpdateRange(initialUser, nextUser);
+            await db.SaveChangesAsync();
+            await UpdateQueueMessage(callbackQuery.Message.Chat.Id, callbackQuery.Message.Id, queueId);
+            Console.WriteLine($"swapped data of users {initialUser.UserId} and {nextUser.UserId}");
+            break;
     }
 }
 async Task CreateQueueCommand(string args, Message msg)
@@ -292,9 +296,11 @@ async Task ShowAllQueuesCommand(Message msg)
         if (queue.QueueChatId != msg.Chat.Id) continue;
         try
         {
-            ReplyParameters parameters = new ReplyParameters();
-            parameters.ChatId = queue.QueueChatId;
-            parameters.MessageId = queue.QueueMessageId;
+            ReplyParameters parameters = new ReplyParameters
+            {
+                ChatId = queue.QueueChatId,
+                MessageId = queue.QueueMessageId
+            };
             await bot.SendMessage(msg.Chat.Id, $"{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Command_HereIsQueue)} {GetQueueName(queue.QueueId)}", replyParameters: parameters);
         }
         catch (ApiRequestException e)
@@ -352,13 +358,14 @@ async Task SetLocaleCommand(string args, Message msg)
 async Task UsageCommand(Message msg)
 {
     Console.WriteLine("Executing /usage command");
-    string usageMessage = $"{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Title)}" +
-                $"\n\n/createqueue <{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Name)}> - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_CreateQueueUsage)}" +
-                $"\n\n/showallqueues - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_ShowAllQueues)}" +
-                $"\n\n/showmyqueues - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_ShowMyQueues)}" +
-                $"\n\n/usage - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Usage)}" +
-                $"\n\n/setlocale <{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Name)}> - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_SetLocale)}";
-    await bot.SendMessage(msg.Chat.Id, usageMessage);
+    StringBuilder sb = new StringBuilder();
+    sb.Append($"{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Title)}");
+    sb.Append($"\n\n/createqueue <{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Name)}> - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_CreateQueueUsage)}");
+    sb.Append($"\n\n/showallqueues - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_ShowAllQueues)}");
+    sb.Append($"\n\n/showmyqueues - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_ShowMyQueues)}");
+    sb.Append($"\n\n/usage - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Usage)}");
+    sb.Append($"\n\n/setlocale <{LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_Name)}> - {LocalesTextHolder.GetText(msg.Chat.Id, LocaleKeys.Usage_SetLocale)}");
+    await bot.SendMessage(msg.Chat.Id, sb.ToString());
 }
 #endregion
 
@@ -410,7 +417,7 @@ async Task OnCommand(string command, string args, Message msg)
     }
 }
 
-async Task OnUpdate(Telegram.Bot.Types.Update update)
+async Task OnUpdate(Update update)
 {
     try
     {
@@ -427,6 +434,6 @@ async Task OnUpdate(Telegram.Bot.Types.Update update)
 async Task OnCallbackQuery(CallbackQuery callbackQuery)
 {
     if (callbackQuery.Data == null) { return; }
-    if (callbackQuery.Data.StartsWith("Queue")) { await HandleQueueButton(callbackQuery); return; }
+    if (callbackQuery.Data.StartsWith("Queue")) { await HandleQueueButton(callbackQuery); }
 }
 #endregion

@@ -39,3 +39,11 @@ public enum DateTimeIndicateType
     Date,
     Time
 }
+
+public enum CallbackQueryType
+{
+    None,
+    QueueEnter,
+    QueueLeave,
+    QueueLet
+}

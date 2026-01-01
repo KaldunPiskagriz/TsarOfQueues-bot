@@ -7,7 +7,7 @@ public class QueueUserEntry
     public string UserName { get; set; }
     public int QueueId { get; set; }
     public int QueuePosition { get; set; }
-    public QueueDataEntry? QueueData { get; set; }
+    public QueueDataEntry QueueData { get; set; }
 }
 
 public class QueueDataEntry
@@ -18,7 +18,7 @@ public class QueueDataEntry
     public int QueueMessageId { get; set; }
     public long QueueChatId { get; set; }
     public DateTime ExpireDate { get; set; }
-    public ICollection<QueueUserEntry> Users { get; set; }
+    public ICollection<QueueUserEntry>? Users { get; set; }
 }
 
 public class QueueChatLocaleEntry
@@ -41,15 +41,15 @@ public class ApplicationContext : DbContext
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
     {
-        optionsBuilder.UseSqlite("Data Source=queues.db");
+        optionsBuilder.UseSqlite("Data Source=queues.db;foreign keys=true;");
     }
     
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
-        modelBuilder.Entity<QueueUserEntry>()
-            .HasOne(p => p.QueueData)
-            .WithMany(t => t.Users)
-            .HasForeignKey(p => p.QueueId)
-            .HasPrincipalKey(t=>t.QueueId);
+        modelBuilder.Entity<QueueDataEntry>()
+            .HasMany(e => e.Users)
+            .WithOne(e => e.QueueData)
+            .HasForeignKey(e => e.QueueId)
+            .HasPrincipalKey(e => e.QueueId);
     }
 }
